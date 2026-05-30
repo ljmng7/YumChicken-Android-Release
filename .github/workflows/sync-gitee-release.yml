@@ -1,0 +1,135 @@
+name: Sync release to Gitee
+
+on:
+  release:
+    types:
+      - published
+      - edited
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag to sync. Defaults to the latest GitHub release.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GITEE_REPOSITORY: ljmng7/YumChicken-Android-Release
+      GITEE_TARGET_COMMITISH: main
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Validate required secrets
+        env:
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+        run: |
+          if [[ -z "$GITEE_ACCESS_TOKEN" ]]; then
+            echo "::error::GITEE_ACCESS_TOKEN is not configured"
+            exit 1
+          fi
+
+      - name: Resolve release
+        id: release
+        env:
+          TAG_NAME: ${{ inputs.tag_name || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${TAG_NAME:-}" ]]; then
+            release_json="$(gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --json body,name,tagName)"
+          else
+            release_json="$(gh release view --repo "$GITHUB_REPOSITORY" --json body,name,tagName)"
+          fi
+
+          tag_name="$(jq -r '.tagName' <<<"$release_json")"
+          release_name="$(jq -r 'if .name == null or .name == "" then .tagName else .name end' <<<"$release_json")"
+          body_file="$(mktemp)"
+          jq -r '.body // ""' <<<"$release_json" > "$body_file"
+
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "body_file=$body_file" >> "$GITHUB_OUTPUT"
+
+      - name: Download GitHub release assets
+        env:
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist \
+            --clobber
+
+          if ! compgen -G "dist/*" >/dev/null; then
+            echo "::error::GitHub release ${TAG_NAME} has no downloadable assets"
+            exit 1
+          fi
+
+      - name: Sync Gitee release
+        env:
+          GITEE_ACCESS_TOKEN: ${{ secrets.GITEE_ACCESS_TOKEN }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          RELEASE_NAME: ${{ steps.release.outputs.release_name }}
+          BODY_FILE: ${{ steps.release.outputs.body_file }}
+        run: |
+          set -euo pipefail
+
+          gitee_owner="${GITEE_REPOSITORY%%/*}"
+          gitee_repo="${GITEE_REPOSITORY#*/}"
+          gitee_api="https://gitee.com/api/v5/repos/${gitee_owner}/${gitee_repo}"
+
+          gitee_request() {
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer ${GITEE_ACCESS_TOKEN}" \
+              -H "Accept: application/json" \
+              "$@"
+          }
+
+          release_json="$(
+            gitee_request "${gitee_api}/releases/tags/${TAG_NAME}" || true
+          )"
+          release_id="$(jq -r '.id // empty' <<<"$release_json")"
+
+          if [[ -z "$release_id" ]]; then
+            release_json="$(
+              gitee_request \
+                -X POST \
+                -F "tag_name=${TAG_NAME}" \
+                -F "name=${RELEASE_NAME}" \
+                -F "body=<${BODY_FILE}" \
+                -F "target_commitish=${GITEE_TARGET_COMMITISH}" \
+                "${gitee_api}/releases"
+            )"
+            release_id="$(jq -r '.id // empty' <<<"$release_json")"
+          fi
+
+          if [[ -z "$release_id" ]]; then
+            echo "::error::Unable to resolve Gitee release id for ${TAG_NAME}"
+            exit 1
+          fi
+
+          existing_files="$(
+            gitee_request "${gitee_api}/releases/${release_id}/attach_files"
+          )"
+
+          for file in dist/*; do
+            file_name="$(basename "$file")"
+            jq -r --arg name "$file_name" '.[] | select(.name == $name) | .id' <<<"$existing_files" |
+              while read -r attach_file_id; do
+                [[ -z "$attach_file_id" ]] && continue
+                gitee_request \
+                  -X DELETE \
+                  "${gitee_api}/releases/${release_id}/attach_files/${attach_file_id}" >/dev/null
+              done
+
+            gitee_request \
+              -X POST \
+              -F "file=@${file}" \
+              "${gitee_api}/releases/${release_id}/attach_files" >/dev/null
+          done
