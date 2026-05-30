@@ -84,6 +84,12 @@ jobs:
               "$@"
           }
 
+          gitee_upload() {
+            curl --fail-with-body --silent --show-error --connect-timeout 30 --max-time 1800 \
+              -H "Accept: application/json" \
+              "$@"
+          }
+
           sync_release() {
             local tag_name="$1"
             local work_dir body_file release_json release_name release_id existing_files file file_name
@@ -155,10 +161,9 @@ jobs:
                     "${gitee_api}/releases/${release_id}/attach_files/${attach_file_id}" >/dev/null
                 done
 
-              gitee_request \
+              gitee_upload \
                 -X POST \
                 -F "access_token=${GITEE_ACCESS_TOKEN}" \
-                -F "release_id=${release_id}" \
                 -F "file=@${file}" \
                 "${gitee_api}/releases/${release_id}/attach_files" >/dev/null
 
