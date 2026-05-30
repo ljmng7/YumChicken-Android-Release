@@ -79,8 +79,7 @@ jobs:
           gitee_api="https://gitee.com/api/v5/repos/${gitee_owner}/${gitee_repo}"
 
           gitee_request() {
-            curl --fail-with-body --silent --show-error \
-              -H "Authorization: Bearer ${GITEE_ACCESS_TOKEN}" \
+            curl --fail-with-body --silent --show-error --connect-timeout 30 --max-time 300 \
               -H "Accept: application/json" \
               "$@"
           }
@@ -109,7 +108,10 @@ jobs:
             fi
 
             release_json="$(
-              gitee_request "${gitee_api}/releases/tags/${tag_name}" || true
+              gitee_request \
+                -G \
+                --data-urlencode "access_token=${GITEE_ACCESS_TOKEN}" \
+                "${gitee_api}/releases/tags/${tag_name}" || true
             )"
             release_id="$(jq -r '.id // empty' <<<"$release_json")"
 
@@ -117,6 +119,7 @@ jobs:
               release_json="$(
                 gitee_request \
                   -X POST \
+                  -F "access_token=${GITEE_ACCESS_TOKEN}" \
                   -F "tag_name=${tag_name}" \
                   -F "name=${release_name}" \
                   -F "body=<${body_file}" \
@@ -132,23 +135,34 @@ jobs:
             fi
 
             existing_files="$(
-              gitee_request "${gitee_api}/releases/${release_id}/attach_files"
+              gitee_request \
+                -G \
+                --data-urlencode "access_token=${GITEE_ACCESS_TOKEN}" \
+                "${gitee_api}/releases/${release_id}/attach_files"
             )"
 
             for file in "${work_dir}"/dist/*; do
               file_name="$(basename "$file")"
+              echo "Uploading ${file_name} to Gitee release ${tag_name}"
+
               jq -r --arg name "$file_name" '.[] | select(.name == $name) | .id' <<<"$existing_files" |
                 while read -r attach_file_id; do
                   [[ -z "$attach_file_id" ]] && continue
                   gitee_request \
                     -X DELETE \
+                    -G \
+                    --data-urlencode "access_token=${GITEE_ACCESS_TOKEN}" \
                     "${gitee_api}/releases/${release_id}/attach_files/${attach_file_id}" >/dev/null
                 done
 
-                gitee_request \
-                  -X POST \
-                  -F "file=@${file}" \
-                  "${gitee_api}/releases/${release_id}/attach_files" >/dev/null
+              gitee_request \
+                -X POST \
+                -F "access_token=${GITEE_ACCESS_TOKEN}" \
+                -F "release_id=${release_id}" \
+                -F "file=@${file}" \
+                "${gitee_api}/releases/${release_id}/attach_files" >/dev/null
+
+              echo "Uploaded ${file_name}"
             done
 
             echo "::endgroup::"
