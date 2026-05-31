@@ -85,7 +85,9 @@ jobs:
           }
 
           gitee_upload() {
-            curl --fail-with-body --silent --show-error --connect-timeout 30 --max-time 1800 \
+            curl --fail-with-body --silent --show-error --location --http1.1 \
+              --retry 2 --retry-delay 30 --retry-all-errors \
+              --connect-timeout 60 --max-time 7200 \
               -H "Accept: application/json" \
               "$@"
           }
@@ -149,7 +151,7 @@ jobs:
 
             for file in "${work_dir}"/dist/*; do
               file_name="$(basename "$file")"
-              echo "Uploading ${file_name} to Gitee release ${tag_name}"
+              echo "Uploading ${file_name} ($(wc -c < "$file") bytes) to Gitee release ${tag_name}"
 
               jq -r --arg name "$file_name" '.[] | select(.name == $name) | .id' <<<"$existing_files" |
                 while read -r attach_file_id; do
