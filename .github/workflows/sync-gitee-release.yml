@@ -67,6 +67,14 @@ jobs:
 
           echo "releases_file=$releases_file" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install gitee-release-cli
+        run: npm install -g gitee-release-cli@2.1.1
+
       - name: Sync Gitee releases
         env:
           RELEASES_FILE: ${{ steps.releases.outputs.releases_file }}
@@ -142,6 +150,21 @@ jobs:
               exit 1
             fi
 
+            cat > "${work_dir}/package.json" <<EOF
+          {
+            "name": "YumChicken-Android-Release",
+            "repository": {
+              "type": "git",
+              "url": "git@gitee.com:${GITEE_REPOSITORY}.git"
+            }
+          }
+          EOF
+
+            (
+              cd "$work_dir"
+              gitee-release config accessToken "$GITEE_ACCESS_TOKEN"
+            )
+
             existing_files="$(
               gitee_request \
                 -G \
@@ -163,11 +186,22 @@ jobs:
                     "${gitee_api}/releases/${release_id}/attach_files/${attach_file_id}" >/dev/null
                 done
 
-              gitee_upload \
-                -X POST \
-                -F "access_token=${GITEE_ACCESS_TOKEN}" \
-                -F "file=@${file}" \
-                "${gitee_api}/releases/${release_id}/attach_files" >/dev/null
+              (
+                cd "$work_dir"
+                gitee-release assets upload "$file" --target "${tag_name#v}"
+              )
+
+              existing_files="$(
+                gitee_request \
+                  -G \
+                  --data-urlencode "access_token=${GITEE_ACCESS_TOKEN}" \
+                  "${gitee_api}/releases/${release_id}/attach_files"
+              )"
+
+              if ! jq -e --arg name "$file_name" '.[] | select(.name == $name)' <<<"$existing_files" >/dev/null; then
+                echo "::error::Gitee asset upload did not create ${file_name}"
+                exit 1
+              fi
 
               echo "Uploaded ${file_name}"
             done
